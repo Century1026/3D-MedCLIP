@@ -12,3 +12,12 @@ from .modeling_medclip import (
 )
 
 from .dataset import MedCLIPProcessor
+
+from .mri_self_supervised import (
+    MaskedAutoencoder3D,
+    ContrastiveLearner3D,
+    MRI3DDataset,
+    RandomMRITransform,
+    SelfSupervisedConfig,
+    SelfSupervisedPretrainer,
+)
