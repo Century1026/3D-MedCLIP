@@ -27,6 +27,14 @@ from .prompts import process_class_prompts, process_class_prompts_for_tuning
 from .prompts import generate_chexpert_class_prompts
 from . import constants
 
+try:
+    import nibabel as nib
+except Exception:
+    nib = None
+import torch.nn.functional as F
+import os
+from torch.nn.utils.rnn import pad_sequence
+
 class MedCLIPFeatureExtractor(CLIPFeatureExtractor):
     def __init__(self, 
         do_resize=True, 
@@ -618,3 +626,116 @@ class PromptTuningImageCollator:
             'prompt_inputs': self.prompt_texts_inputs,
             'labels': inputs['labels'],
         }
+
+
+class MRIBiomarkerDataset(Dataset):
+    def __init__(self, csv_path, mri_dir, text_template=None, volume_size=None):
+        """Pairs 3D MRI volumes with biomarker-derived text.
+
+        csv_path: CSV containing columns Subject_Name and PTAU181 (optionally others).
+        mri_dir: directory containing NIfTI files whose filenames contain Subject_Name.
+        text_template: function or format string to build the text from row values.
+        volume_size: tuple (D,H,W) to resize volume (nearest for simplicity).
+        """
+        super().__init__()
+        self.csv_path = csv_path
+        self.mri_dir = mri_dir
+        self.volume_size = volume_size
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        df.columns = df.columns.map(lambda c: c.strip())
+        assert 'Subject_Name' in df.columns, 'Subject_Name missing in CSV'
+        self.df = df
+        if text_template is None:
+            self.text_template = lambda r: f"DX: {r.get('DX','NA')}. Plasma biomarkers: pTau181={r.get('PTAU181','NA')}."
+        elif isinstance(text_template, str):
+            self.text_template = lambda r, t=text_template: t.format(**r)
+        else:
+            self.text_template = text_template
+
+        self.tokenizer = AutoTokenizer.from_pretrained(constants.BERT_TYPE)
+        self.tokenizer.model_max_length = 77
+
+        # Build index mapping subject -> file path (first match)
+        self.records = []
+        for _, row in df.iterrows():
+            name = str(row['Subject_Name']).strip()
+            path = self._find_volume(name)
+            if path is None:
+                continue
+            self.records.append((name, path, row.to_dict()))
+
+        if len(self.records) == 0:
+            raise RuntimeError('No MRI volumes found matching Subject_Name entries.')
+
+    def _find_volume(self, subject_name):
+        patterns = [f"*{subject_name}*.nii", f"*{subject_name}*.nii.gz"]
+        # Search via glob
+        import glob
+        for pat in patterns:
+            matched = glob.glob(os.path.join(self.mri_dir, '**', pat), recursive=True)
+            if matched:
+                return sorted(matched, key=lambda p: (len(p), p))[0]
+        return None
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        name, path, row = self.records[idx]
+        if nib is None:
+            raise ImportError('nibabel is required to load NIfTI volumes')
+        vol = nib.load(path).get_fdata().astype(np.float32)
+        # Normalize per volume
+        if np.nanstd(vol) > 0:
+            vol = (vol - np.nanmean(vol)) / (np.nanstd(vol) + 1e-6)
+        vol = np.nan_to_num(vol)
+        # Resize if requested
+        if self.volume_size is not None:
+            # Use torch for simple trilinear resize
+            t = torch.from_numpy(vol)[None, None]
+            t = torch.nn.functional.interpolate(t, size=self.volume_size, mode='trilinear', align_corners=False)
+            vol = t[0,0].numpy()
+        # To tensor [C=1, D, H, W]
+        vol_t = torch.from_numpy(vol)[None]
+        # Build text
+        text = self.text_template(row)
+        toks = self.tokenizer([text], truncation=True, padding=True, return_tensors='pt')
+        sample = {
+            'pixel_values': vol_t,
+            'input_ids': toks['input_ids'][0],
+            'attention_mask': toks['attention_mask'][0],
+        }
+        # Optional label if DX provided as AD vs non-AD
+        if 'DX' in row:
+            dx = str(row['DX']).strip().upper()
+            label = 1 if dx in ['AD', 'DEMENTIA', 'ALZHEIMER', 'ADNI-AD'] else 0
+            sample['labels'] = torch.tensor(label, dtype=torch.long)
+        return sample
+
+
+class MRIBiomarkerCollator:
+    def __call__(self, batch):
+        inputs = defaultdict(list)
+        for b in batch:
+            inputs['pixel_values'].append(b['pixel_values'])
+            inputs['input_ids'].append(b['input_ids'])
+            inputs['attention_mask'].append(b['attention_mask'])
+            if 'labels' in b:
+                inputs['labels'].append(b['labels'])
+        pixel_values = torch.stack(inputs['pixel_values'], 0)
+        if pixel_values.dim() == 4 and pixel_values.shape[1] == 1:
+            pixel_values = pixel_values.repeat((1, 3, 1, 1))
+        elif pixel_values.dim() == 5 and pixel_values.shape[1] == 1:
+            pixel_values = pixel_values.repeat((1, 3, 1, 1, 1))
+        # Pad variable-length token sequences
+        input_ids = pad_sequence(inputs['input_ids'], batch_first=True, padding_value=0)
+        attention_mask = pad_sequence(inputs['attention_mask'], batch_first=True, padding_value=0)
+        out = {
+            'pixel_values': pixel_values,
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+        }
+        if 'labels' in inputs and len(inputs['labels']) > 0:
+            out['labels'] = torch.stack(inputs['labels'], 0)
+        return out

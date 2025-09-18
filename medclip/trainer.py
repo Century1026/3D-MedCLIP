@@ -186,7 +186,7 @@ class Trainer:
                     self._save_ckpt(model, save_dir)
                     print('model saved to', os.path.join(output_path, WEIGHTS_NAME))
 
-        if save_best_model:
+        if save_best_model and len(self.score_logs) > 0 and 'global_step' in self.score_logs:
             import pandas as pd
             from distutils.dir_util import copy_tree
             res = pd.DataFrame(self.score_logs)
@@ -200,6 +200,8 @@ class Trainer:
             copy_tree(best_origin_path, best_save_path)
 
         if eval_dataloader is None and output_path is not None:   #No evaluator, but output path: save final model version
+            if not os.path.exists(output_path):
+                os.makedirs(output_path)
             state_dict = model.state_dict()
             torch.save(state_dict, os.path.join(output_path, WEIGHTS_NAME))
             print('model saved to', os.path.join(output_path, WEIGHTS_NAME))

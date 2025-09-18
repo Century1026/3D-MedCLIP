@@ -5,6 +5,7 @@ from .modeling_medclip import (
     MedCLIPTextModel, # text encoder
     MedCLIPVisionModel, # vision encoder (ResNet50)
     MedCLIPVisionModelViT, # vision encoder (Swin-Transformer)
+    MedCLIPVisionModel3D, # vision encoder (3D ResNet18)
     MedCLIPModel, # vision-language encoders
     PromptClassifier, # make classification based manual prompts
     PromptTuningClassifier, # make classification based on prompt tuning
@@ -12,12 +13,3 @@ from .modeling_medclip import (
 )
 
 from .dataset import MedCLIPProcessor
-
-from .mri_self_supervised import (
-    MaskedAutoencoder3D,
-    ContrastiveLearner3D,
-    MRI3DDataset,
-    RandomMRITransform,
-    SelfSupervisedConfig,
-    SelfSupervisedPretrainer,
-)

@@ -11,6 +11,7 @@ import numpy as np
 import torchvision
 
 from . import constants
+from torchvision.models.video import r3d_18
 
 class MedCLIPTextModel(nn.Module):
     def __init__(self,
@@ -81,6 +82,53 @@ class MedCLIPVisionModel(nn.Module):
         img_embeds = self.model(pixel_values)
         return img_embeds
 
+class MedCLIPVisionModel3D(nn.Module):
+    '''
+    3D vision encoder for volumetric MRI. Uses a 3D ResNet-18 backbone.
+    Expects input volumes shaped as [batch_size, 1|3, depth, height, width].
+    '''
+    def __init__(self, checkpoint=None, medclip_checkpoint=None):
+        super().__init__()
+        # Initialize a 3D ResNet (expects [N, C, T, H, W])
+        self.model = r3d_18(pretrained=False)
+        # Adapt first conv layer to single-channel inputs if needed at runtime
+        # Keep weights initialization default; handling 1-channel in forward by repeating if necessary
+        # Replace classification head with projection to 512 dims
+        num_fts = self.model.fc.in_features
+        self.model.fc = nn.Linear(num_fts, 512, bias=False)
+        if checkpoint is not None:
+            state_dict = torch.load(os.path.join(checkpoint, constants.WEIGHTS_NAME))
+            missing_keys, unexpected_keys = self.load_state_dict(state_dict, strict=False)
+            print('missing keys:', missing_keys)
+            print('unexpected keys:', unexpected_keys)
+            print('load model weight from:', checkpoint)
+        if medclip_checkpoint is not None:
+            self.load_from_medclip(medclip_checkpoint)
+
+    def load_from_medclip(self, checkpoint):
+        '''handle key mismatch of medclip and the vision encoder.
+        '''
+        state_dict = torch.load(os.path.join(checkpoint, constants.WEIGHTS_NAME))
+        new_state_dict = {}
+        for key in state_dict.keys():
+            if 'vision_model' in key:
+                new_state_dict[key.replace('vision_model.','')] = state_dict[key]
+        missing_keys, unexpected_keys = self.load_state_dict(new_state_dict, strict=False)
+        print('missing keys:', missing_keys)
+        print('unexpected keys:', unexpected_keys)
+        print('load model weight from:', checkpoint)
+
+    def forward(self, pixel_values, **kwargs):
+        '''args:
+        pixel_values: tensor with shape [bs, C, depth, height, width]
+        '''
+        if pixel_values.dim() != 5:
+            raise ValueError('MedCLIPVisionModel3D expects a 5D tensor [N, C, D, H, W].')
+        if pixel_values.shape[1] == 1:
+            pixel_values = pixel_values.repeat((1,3,1,1,1))
+        img_embeds = self.model(pixel_values)
+        return img_embeds
+
 class MedCLIPVisionModelViT(nn.Module):
     '''take an VIT model as the backbone.
     '''
@@ -135,7 +183,7 @@ class MedCLIPModel(nn.Module):
         ) -> None:
         super().__init__()
         text_proj_bias = False
-        assert vision_cls in [MedCLIPVisionModel, MedCLIPVisionModelViT], 'vision_cls should be one of [MedCLIPVisionModel, MedCLIPVisionModelViT]'
+        assert vision_cls in [MedCLIPVisionModel, MedCLIPVisionModelViT, MedCLIPVisionModel3D], 'vision_cls should be one of [MedCLIPVisionModel, MedCLIPVisionModelViT, MedCLIPVisionModel3D]'
 
         self.vision_model = vision_cls(checkpoint=vision_checkpoint)
         self.text_model = MedCLIPTextModel(proj_bias=False)
